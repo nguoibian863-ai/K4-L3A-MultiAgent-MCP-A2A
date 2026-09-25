@@ -1,78 +1,97 @@
-# L3A Architecture Record
+# L3A architecture
 
-Tài liệu này ghi lại kiến trúc và các quyết định kỹ thuật của hệ thống Multi-Agent L3A. Mọi quyết định đều có thể kiểm chứng độc lập thông qua mã nguồn, trace log và public contracts.
+## Luồng xử lý
 
-## 1. System overview
+`Coordinator → Order / Payment / Shipment / Policy specialists → Verifier → Output`
 
-Luồng xử lý từ hồ sơ khiếu nại đầu vào đến kết quả thẩm định và nhật ký giám sát:
+- `workflow.py` điều phối bốn specialist bất đồng bộ. Mỗi specialist nhận nhiệm vụ,
+  lấy evidence, ghi `tool_result_consumed`, rồi bàn giao refs và số lỗi cho verifier.
+- `analysis.py` phân tích dữ liệu độc lập với network. Không dùng tên case, thứ tự case
+  hoặc bảng đáp án để quyết định. Claim chỉ xác định phạm vi cần điều tra; một claim
+  chỉ được chọn khi có điều kiện nghiệp vụ độc lập hỗ trợ.
+- `cli.py` tạo run một lần bằng URL trong cấu hình, kiểm tra HTTP status, chạy tối đa
+  hai case đồng thời. Mỗi case có MCP session và trace riêng. Nếu transport ngắt,
+  kết nối lại tối đa hai lần; chỉ trace của lần hoàn tất được đưa vào artifact.
 
-```text
-[Input Case] ──► [Coordinator] ──► [Specialist Agents] ──► [Verifier] ──► [Output JSON]
-                        │                    │                 │
-                        └──── Trace Log ◄────┴── MCP Gateway ──┘
+## Công cụ và bằng chứng
+
+| Specialist | Công cụ | Vai trò |
+| --- | --- | --- |
+| Order | `get_order`, `get_order_items`, khi cần `get_sellers` | Trạng thái, item, seller thuộc đơn |
+| Payment | `get_payment_timeline`; fallback `get_order_payments`; khi cần `get_refund_timeline` | Capture, reconciliation, duplicate, refund lifecycle |
+| Shipment | `get_shipment_summary` | Thời điểm bàn giao, giao nhận, trách nhiệm từ sự kiện |
+| Policy | `get_policy` | Status, action, refund và loại bên chịu trách nhiệm |
+| Verifier | Không gọi network | Phân tích kết quả specialist và tạo output |
+
+Gateway khám phá tool và kiểm tra arguments theo schema trước khi gọi. Mọi phản hồi
+được kiểm tra public evidence schema. Cache giữ phản hồi thành công trong một lần xử
+lý case, kể cả khi reconnect; khóa gồm case_id, tool và arguments. Case mới hoặc run
+mới tạo cache mới. Không đọc cache từ artifact cũ.
+
+Payment timeline đã chứa payment rows nên không gọi thêm `get_order_payments` khi
+timeline thành công. Refund chỉ được truy vấn khi claim hoặc dữ liệu có liên quan.
+Shipment được gọi khi có claim giao nhận, claim không được hỗ trợ, phạm vi chưa rõ,
+hoặc bằng chứng order/payment/refund chưa đủ kết luận. Nếu đã đủ bằng chứng để giải
+quyết vấn đề thanh toán, specialist shipment bàn giao `NO_LOOKUP_NEEDED` và không gọi
+tool. Không gọi customer/product tools cho các khiếu nại không liên quan.
+
+## Quyết định nghiệp vụ
+
+- Refund: đọc `data.events`, sắp xếp thời gian và xét trạng thái cuối. Phản hồi
+  `{"events": []}` không chặn các nhánh khác. Refund hoàn tất không tạo hoàn tiền lần hai.
+- Payment mismatch: dùng sự kiện reconciliation có thẩm quyền.
+- Duplicate: dùng sự kiện duplicate trực tiếp, hoặc nhiều capture bằng nhau với tổng
+  thực thu vượt giá trị đơn. Hai số tiền bằng nhau không đủ kết luận duplicate.
+- Split payment: các payment sequence khác nhau và tổng capture khớp giá trị item + freight.
+- Giao trễ: cần giao khách sau hạn hoặc sự kiện `delivered_late` đã xác nhận. Bàn giao
+  trễ nhưng giao khách đúng hạn không tự động được tính là giao trễ.
+- Seller: lấy ID từ item thuộc đơn, không sao chép ID cụ thể từ policy dùng chung.
+- Policy quyết định số tiền, status và action. Tính tiền bằng `Decimal` rồi xuất JSON number.
+- Claim yêu cầu hoàn toàn bộ được đánh giá riêng; bồi hoàn một phần là
+  `partially_supported`, không tự động đồng nghĩa với hoàn toàn bộ.
+
+Một số dữ liệu MCP có cùng item ID nhưng nhiều shipping limit và nhiều nhóm capture
+ở các ngày khác nhau. Khi đồng thời có hai dấu hiệu này, ưu tiên nhóm capture khớp
+ngày mua của order; nếu không xác định được mới dùng nhóm gần nhất trước `opened_at`.
+Refund xuất hiện sau nhóm capture kế tiếp vẫn được giữ khi số tiền gắn duy nhất với
+nhóm đang xét. Sự kiện giao hàng cũ chỉ được loại khi snapshot order và shipment
+cùng xác nhận một thời điểm giao mới hơn. Mọi lựa chọn đều ghi `data_conflicts`.
+Đây là heuristic xử lý dữ liệu xung đột, không phải
+quy tắc được bảo đảm bởi public contract. Order snapshot nằm ngoài khoảng đang xét
+không được dùng để khẳng định trạng thái; thiếu bằng chứng sẽ cần điều tra thêm.
+
+## Lỗi và confidence
+
+- Lỗi tool được ghi thành handoff `EVIDENCE_INCOMPLETE`; không coi lỗi là kết quả rỗng.
+- Lỗi cấu trúc/khác order làm dừng xử lý thay vì âm thầm bỏ qua.
+- Thiếu dữ liệu cốt lõi hoặc thiếu refund evidence cho claim refund:
+  `insufficient_evidence`, `needs_investigation`, không tự cấp hoàn tiền.
+- Confidence thay đổi theo bằng chứng trực tiếp, suy luận số tiền, xung đột và thiếu dữ liệu.
+  Xung đột đã giải quyết bằng ngày mua/snapshot thống nhất có trần 0,92; xung đột chưa
+  giải quyết giữ trần 0,80 hoặc 0,65. Warning từ MCP giữ trần 0,80.
+  Đây là heuristic, chưa được calibration trên nhãn chuẩn độc lập.
+
+## Artifacts và kiểm tra
+
+```powershell
+day09 run --artifacts-dir dist/my-run
+day09 validate --artifacts-dir dist/my-run
+day09 package --artifacts-dir dist/my-run --output dist/submission-improved.zip
 ```
 
-1. **Input**: Tải từ `inputs/<case_id>.json`.
-2. **Coordinator**: Tiếp nhận hồ sơ, lập kế hoạch điều tra và phân công nhiệm vụ cho các chuyên gia qua sự kiện `task_assigned`.
-3. **Specialist Agents**: Gọi các MCP tools theo đúng thẩm quyền được cấp, tiêu thụ dữ liệu và phát sinh mã chứng cứ `evidence_ref` gắn với sự kiện `tool_result_consumed`. Sau đó bàn giao qua `handoff`.
-4. **Verifier**: Rà soát các bất biến nghiệp vụ (invariants), đối chiếu bằng chứng, tổng hợp kết luận, tính toán bồi hoàn tài chính và phát sinh sự kiện `verification_completed`.
-5. **Output & Trace**: Xuất file `outputs/<case_id>.json` tuân thủ 100% `day09-l3a-output-v2` và ghi vết toàn bộ vào `traces/trace.jsonl`.
+Mỗi run ghi `outputs/`, `traces/trace.jsonl`, `case-traces/`, `evidence.jsonl`, `run.json`
+trong thư mục riêng. Không ghi đè bản cũ. `evidence.jsonl` phục vụ debug cục bộ;
+không chứa credential và không được đóng gói. ZIP chỉ có manifest, outputs và trace.
 
-## 2. Agent ownership
+Validator kiểm tra schema, inventory, refund sum/status, seller scope, lifecycle trace,
+output/claim refs đã được consume và không trùng giữa các case. Validator không thay
+thế audit phía máy chủ và không tính được semantic score riêng của competition.
 
-| Actor | Input | Trách nhiệm | Tool Permissions | Output/handoff |
-| --- | --- | --- | --- | --- |
-| **Coordinator** | `case_id`, `customer_request`, `policy_version` | Khởi tạo điều tra, phân tích phạm vi khiếu nại, kích hoạt active run | Không gọi MCP tools | Phân công nhiệm vụ (`task_assigned`) tới các Specialists |
-| **Order/item** | `case_id`, `claimed_order_id` | Xác minh trạng thái đơn hàng (`canceled`, `unavailable`, `delivered`), danh mục sản phẩm, người bán liên quan | `get_order`, `get_order_items` | `ORDER_ANALYSIS_COMPLETED` kèm danh sách item_ids, seller_ids, order status |
-| **Payment** | `case_id`, `claimed_order_id` | Đối soát lịch sử thanh toán, phương thức trả tiền (split, credit), phát hiện duplicate charge hoặc refund failed/pending | `get_order_payments`, `get_payment_timeline`, `get_refund_timeline` | `PAYMENT_ANALYSIS_COMPLETED` kèm tổng tiền thanh toán, payment_references, trạng thái hoàn tiền |
-| **Shipment** | `case_id`, `claimed_order_id` | Phân tích timeline giao nhận, so sánh ngày giao thực tế với cam kết để phân định trễ hạn do bên vận chuyển hay người bán | `get_shipment_summary` | `SHIPMENT_ANALYSIS_COMPLETED` kèm chỉ dấu `late_seller` hoặc `late_logistics` |
-| **Policy** | `case_id`, `policy_version` | Tra cứu điều khoản bồi thường, mức trần hoàn tiền BRL và bên chịu trách nhiệm tương ứng theo quy định sàn | `get_policy` | `POLICY_ANALYSIS_COMPLETED` kèm bộ quy tắc nghiệp vụ `rules` |
-| **Verifier** | Case gốc và kết quả từ 4 Specialists | Kiểm tra toàn vẹn Invariants, phân loại `primary_issue`, tính toán `financial_resolution`, đánh giá claims, hoàn thiện output | Không gọi MCP tools (chỉ kiểm định dữ liệu từ specialists) | Final Output JSON (`outputs/<case_id>.json`) |
+Tests dùng dữ liệu tổng hợp cho lỗi nghiệp vụ, isolation, tool discovery và trace.
+`scripts/replay_evidence.py` cho phép chạy lại phân tích trên evidence đã lưu để debug;
+script không tạo submission và không xem claim topic là ground truth.
 
-## 3. A2A protocol
-
-- **Message Envelope & Correlation**: Mọi tương tác và dữ liệu luân chuyển đều được gắn chặt với khóa `case_id`.
-- **Handoff Contract**: Các Specialist Agent hoàn tất phân tích sẽ phát sự kiện `handoff` với `actor=<specialist_name>`, `target="verifier"` và `decision_code` tương ứng.
-- **Tránh lặp (Acyclic Directed Flow)**: Luồng điều phối đi theo một chiều xác định: `Coordinator -> Parallel Specialists -> Verifier`. Không có cơ chế vòng lặp phản hồi đệ quy giữa các agent nhằm loại trừ hoàn toàn nguy cơ deadlock hoặc loop vô tận.
-- **Trace Boundaries**: Chỉ phát các sự kiện vòng đời quan sát được (`case_received`, `task_assigned`, `tool_result_consumed`, `handoff`, `verification_completed`, `case_finalized`). Tuyệt đối không ghi prompt thô hoặc chuỗi suy luận nội bộ (chain-of-thought).
-
-## 4. Evidence lifecycle
-
-- **Validation**: Mọi phản hồi từ MCP Server đều được kiểm tra hợp lệ tức thì qua `mcp-evidence-response-v1.schema.json`.
-- **Isolation (Chống nhiễm chéo)**: Mỗi `evidence_ref` sinh ra được khóa chặt trong phạm vi của đúng `case_id` đang xử lý. Hệ thống không lưu trữ cache dùng chung hay chuyển giao evidence giữa các case khác nhau.
-- **Consumption Trace**: Mỗi khi Specialist Agent sử dụng dữ liệu từ tool để đưa vào kết luận, một sự kiện `tool_result_consumed` được phát ra ngay lập tức với danh sách `evidence_refs=[evidence_ref]`.
-- **Claim Linkage**: Tất cả `evidence_ref` trong `claim_assessments` và `evidence_refs` của output đều là tập con của các evidence đã được audit từ MCP Gateway.
-
-## 5. Failure policy
-
-| Failure | Retry? | Fallback | Trace event/code |
-| --- | --- | --- | --- |
-| **MCP timeout** | Tối đa 2 lần với exponential backoff | Ghi nhận thiếu dữ liệu cho domain đó, chuyển cho Verifier đánh giá mức độ thiếu | `decision_code="MCP_TIMEOUT_FALLBACK"` |
-| **Not found (404/Empty)** | Không retry | Đặt trạng thái domain tương ứng là rỗng (`None`/`[]`), không suy diễn thông tin | `decision_code="ENTITY_NOT_FOUND"` |
-| **Source conflict** | Không retry | Nếu phát hiện mâu thuẫn giữa các nguồn (ví dụ order status vs shipment event), Verifier ưu tiên nguồn có thẩm quyền cao hơn và ghi vào `data_conflicts` | `decision_code="CONFLICT_RESOLVED"` |
-| **Tool Execution Error** | Retry 1 lần sau khi xác nhận active run | Ghi nhận lỗi domain, Verifier kết luận `insufficient_evidence` nếu thiếu dữ liệu trọng yếu | `decision_code="TOOL_ERROR_FALLBACK"` |
-
-## 6. Verification invariants
-
-Trước khi sinh file output cuối cùng, Verifier Agent bắt buộc thực thi 7 phép kiểm định bất biến:
-
-1. **Schema Compliance**: Đảm bảo cấu trúc tuân thủ 100% `day09-l3a-output-v2.schema.json` (không có thêm bất kỳ trường lạ nào ngoài schema).
-2. **Entity Scope**: Các ID trong `affected_entities` (order, item, seller, payment) phải thuộc về case hiện tại, không chứa dữ liệu giả lập.
-3. **Evidence Authenticity**: Mọi mã `evidence_refs` đưa vào output phải có tiền tố `ev_` và được cấp từ MCP Gateway trong phiên chạy hiện tại.
-4. **Consistency**:
-   - Nếu `case_status == "no_action"`, thì `recommended_refund_brl == 0.0` và `refund_lines == []`.
-   - Nếu `case_status == "action_required"` và có hoàn tiền, thì `recommended_refund_brl` phải bằng tổng `amount_brl` của các dòng trong `refund_lines`.
-   - `primary_issue` phải nhất quán với `responsible_parties` (ví dụ: `late_delivery_seller` phải gắn với seller, `late_delivery_logistics` gắn với logistics_provider).
-5. **Currency**: Đơn vị tiền tệ bắt buộc phải là `"BRL"`.
-6. **Confidence Bounds**: Giá trị `confidence` nằm trong khoảng `[0.0, 1.0]`, được hiệu chuẩn phù hợp với độ tin cậy của bằng chứng.
-7. **Action Scope**: Số lượng `resolution_actions` tối đa 8 phần tử, không chứa chuỗi rỗng.
-
-## 7. Reproducibility
-
-- **Runtime**: Python 3.12+ trên hệ điều hành Windows.
-- **Dependencies**: `httpx2>=2,<3`, `jsonschema>=4.25,<5`, `mcp>=2,<3`, `python-dotenv>=1.1,<2`.
-- **Command Line**:
-  - Chạy toàn bộ case: `day09 run`
-  - Kiểm tra tính hợp lệ: `day09 validate`
-  - Đóng gói bài nộp: `day09 package --output dist/submission.zip`
-- **Security**: Không lưu thông tin nhạy cảm, API keys hay secrets vào repo hoặc file nộp bài.
+`scripts/check_offline_workflow.py dist/ban-cai-tien` chạy cả workflow trên capture cũ,
+kiểm tra schema/trace/nhất quán, so sánh quyết định khi gọi tool có chọn lọc với khi có
+đủ bằng chứng, và đếm tool dự kiến. Script không truy cập mạng, không tạo ZIP nộp bài
+và không tính điểm chính thức.
