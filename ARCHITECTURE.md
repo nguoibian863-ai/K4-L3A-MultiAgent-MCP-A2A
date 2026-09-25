@@ -76,25 +76,25 @@ Nguyên tắc chung: retry bị giới hạn ở mức 0 (fail-fast) vì mọi l
 
 ## 6. Verification invariants
 
-Verifier (`_verify` trong `workflow.py`) chạy các kiểm tra sau trên output nháp; mỗi check fail được ghi tên vào `attributes.failed_checks` của event `verification_completed`:
+Trước khi chốt kết quả, thành phần Verifier (`_verify` trong `workflow.py`) thực hiện thẩm định chéo bản thảo output. Mọi vi phạm sẽ được ghi nhận danh sách mã lỗi vào `attributes.failed_checks` thuộc event `verification_completed`:
 
-- **Money totals** (`refund_lines_total_mismatch`): tổng `refund_lines[].amount_brl` phải bằng `recommended_refund_brl`.
-- **Status/refund** (`refund_without_action`): `case_status=no_action` thì không được có tiền hoàn.
-- **Action từ policy** (`action_not_from_policy`): `resolution_actions[0]` phải đúng `recommended_action` của rule.
-- **Root cause** (`root_cause_mismatch`): cause hạng 1 phải khớp `primary_issue`.
-- **Seller responsibility** (`seller_out_of_scope`): mọi bên chịu trách nhiệm loại seller phải nằm trong `affected_entities.seller_ids` (seller thật của đơn).
-- **Evidence ownership** (`evidence_not_consumed`): mọi `evidence_ref` ở output phải thuộc tập đã `tool_result_consumed` trong chính case này, và không rỗng.
-- **Claim linkage** (`claim_evidence_unlinked`): evidence của từng claim phải là tập con của `evidence_refs` top-level.
+- **Khớp tổng tiền hoàn (`refund_lines_total_mismatch`)**: Tổng giá trị các dòng `refund_lines[].amount_brl` bắt buộc phải khớp tuyệt đối với `recommended_refund_brl`.
+- **Ràng buộc tiền hoàn theo trạng thái (`refund_without_action`)**: Trường hợp `case_status=no_action`, hệ thống nghiêm cấm phát sinh bất kỳ khoản hoàn tiền nào.
+- **Tuân thủ chỉ định từ chính sách (`action_not_from_policy`)**: Hành động xử lý đầu tiên (`resolution_actions[0]`) phải đúng với `recommended_action` do quy tắc chính sách chỉ định.
+- **Đồng nhất nguyên nhân cốt lõi (`root_cause_mismatch`)**: Nguyên nhân xếp hạng ưu tiên số 1 (rank 1) phải trùng khớp với `primary_issue`.
+- **Phạm vi trách nhiệm của người bán (`seller_out_of_scope`)**: Mọi bên chịu trách nhiệm thuộc phân loại seller đều phải nằm trong tập `affected_entities.seller_ids` (danh sách seller thực tế của đơn hàng).
+- **Tính hợp lệ và sở hữu bằng chứng (`evidence_not_consumed`)**: Tất cả `evidence_ref` xuất hiện ở output phải thuộc tập chứng cứ đã được tiêu thụ (`tool_result_consumed`) xuyên suốt phiên xử lý của case đó, và không được để trống.
+- **Tính liên kết chứng cứ khiếu nại (`claim_evidence_unlinked`)**: Bằng chứng đính kèm cho từng khiếu nại (`claim_assessments`) bắt buộc phải là tập con của danh sách `evidence_refs` cấp cao nhất.
 
-Ngoài ra `cli.py` còn chạy `Contracts.validate_output()` (schema) và đối chiếu `case_id` output với input trước khi ghi file.
+Bên cạnh đó, `cli.py` đóng vai trò chốt chặn cuối cùng: thực thi `Contracts.validate_output()` để kiểm định schema và đối soát tính toàn vẹn giữa `case_id` đầu ra với đầu vào trước khi ghi tệp.
 
-**Confidence calibration** (`_confidence`), luôn nằm trong [0.05, 0.99]:
-- Điểm gốc 0.97 cho mọi loại lỗi. Bảng điểm public cho thấy calibration (sau khi bỏ hệ số chung) khớp đúng với trường hợp 100% `primary_issue` đúng, nên confidence thấp hơn chỉ làm mất điểm calibration mà không phản ánh rủi ro thật.
-- −0.15 nếu số tiền hoàn của policy không khớp với số tiền nào trong event thuộc vòng đời đơn (không được evidence chứng thực).
-- −0.15 nếu trễ giao nhưng không có event `delivered_late` hợp lệ để xác định bên chịu trách nhiệm.
-- −0.3 cho mỗi check verifier bị fail.
-- Không trừ điểm vì `data_conflicts`: các xung đột item đã được giải quyết theo quy tắc cố định và không làm đổi kết luận.
-- `insufficient_evidence` cố định 0.1.
+**Hiệu chuẩn độ tin cậy (`_confidence`)**, giới hạn nghiêm ngặt trong đoạn `[0.05, 0.99]`:
+- **Mức tin cậy cơ sở 0.97** áp dụng cho mọi kịch bản lỗi: Dữ liệu đối sánh từ bảng điểm công khai chứng minh calibration (khi triệt tiêu hệ số quy đổi chung) đạt tối ưu khi `primary_issue` chính xác 100%; việc hạ điểm tùy tiện chỉ làm suy giảm điểm calibration mà không phản ánh đúng mức độ rủi ro kỹ thuật.
+- **−0.15 điểm**: Áp dụng khi số tiền hoàn theo chính sách không tìm thấy đối ứng trong bất kỳ giao dịch/sự kiện nào thuộc vòng đời đơn (thiếu chứng cứ thực tế bảo chứng).
+- **−0.15 điểm**: Áp dụng khi đơn hàng bị giao trễ nhưng thiếu sự kiện `delivered_late` hợp lệ để xác định rõ chủ thể chịu trách nhiệm.
+- **−0.3 điểm**: Khấu trừ cho mỗi tiêu chí kiểm tra bị thất bại ở bước Verifier.
+- **Không trừ điểm đối với `data_conflicts`**: Do các sai lệch dữ liệu item đã được xử lý triệt để theo thuật toán tiền định và không gây sai lệch phán quyết sau cùng.
+- **Cố định mức 0.1** cho trường hợp `insufficient_evidence`.
 
 ## 7. Reproducibility
 
