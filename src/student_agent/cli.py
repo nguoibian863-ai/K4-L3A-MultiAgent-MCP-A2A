@@ -86,18 +86,24 @@ async def _run(root: Path, target_case_id: str | None = None, force: bool = Fals
                 while remaining_case_ids:
                     case_id = remaining_case_ids[0]
                     case = case_set.cases[case_id]
-                    trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
-                    output = await solve_case(case, gateway, trace)
-                    contracts.validate_output(output, f"outputs/{case_id}.json")
-                    if output.get("case_id") != case_id:
-                        raise ValueError(f"solver returned a mismatched case_id for {case_id}")
-                    target = output_root / f"{case_id}.json"
-                    temporary = target.with_suffix(".json.tmp")
-                    temporary.write_text(
-                        json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-                    )
-                    temporary.replace(target)
-                    trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+                    trace.start_transaction()
+                    try:
+                        trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
+                        output = await solve_case(case, gateway, trace)
+                        contracts.validate_output(output, f"outputs/{case_id}.json")
+                        if output.get("case_id") != case_id:
+                            raise ValueError(f"solver returned a mismatched case_id for {case_id}")
+                        target = output_root / f"{case_id}.json"
+                        temporary = target.with_suffix(".json.tmp")
+                        temporary.write_text(
+                            json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                        )
+                        temporary.replace(target)
+                        trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+                        trace.commit_transaction()
+                    except Exception:
+                        trace.rollback_transaction()
+                        raise
                     case_idx += 1
                     print(f"[{case_idx}/100] Case {case_id} completed: {output['assessment']['primary_issue']}")
                     remaining_case_ids.pop(0)

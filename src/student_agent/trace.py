@@ -16,6 +16,20 @@ class TraceWriter:
         self.path = path
         self.contracts = contracts
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._buffered: list[dict[str, Any]] | None = None
+
+    def start_transaction(self) -> None:
+        self._buffered = []
+
+    def commit_transaction(self) -> None:
+        if self._buffered is not None:
+            with self.path.open("a", encoding="utf-8") as handle:
+                for event in self._buffered:
+                    handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+            self._buffered = None
+
+    def rollback_transaction(self) -> None:
+        self._buffered = None
 
     def emit(
         self,
@@ -46,6 +60,9 @@ class TraceWriter:
         }
         event.update({key: value for key, value in optional.items() if value is not None})
         self.contracts.validate_trace(event, "trace event")
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+        if self._buffered is not None:
+            self._buffered.append(event)
+        else:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
         return event
