@@ -4,6 +4,7 @@ import json
 import re
 import zipfile
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,54 @@ from .contracts import Contracts
 SECRET_PATTERN = re.compile(r"sk-team-[A-Za-z0-9_-]{8,}")
 MAX_FILE_BYTES = 1024 * 1024
 MAX_SUBMISSION_BYTES = 12 * 1024 * 1024
+
+
+def validate_case_consistency(output: dict[str, Any], events: list[dict[str, Any]]) -> None:
+    """Check public invariants without pretending to reproduce the private scorer."""
+    case_id = output["case_id"]
+    finance = output["financial_resolution"]
+    amount = Decimal(str(finance["recommended_refund_brl"]))
+    total = sum((Decimal(str(r["amount_brl"])) for r in finance["refund_lines"]), Decimal(0))
+    if amount != total:
+        raise ValueError(f"{case_id}: refund total does not equal refund lines")
+    status = output["assessment"]["case_status"]
+    if status != "action_required" and (amount or finance["refund_lines"]):
+        raise ValueError(f"{case_id}: non-actionable case has a refund")
+    sellers = set(output["affected_entities"]["seller_ids"])
+    for party in output["root_cause_analysis"]["responsible_parties"]:
+        if party["party_type"] == "seller" and party["party_id"] not in sellers:
+            raise ValueError(f"{case_id}: responsible seller is outside affected sellers")
+    types = [event["event_type"] for event in events]
+    required = {
+        "case_received",
+        "task_assigned",
+        "handoff",
+        "verification_completed",
+        "case_finalized",
+    }
+    if not required <= set(types):
+        raise ValueError(f"{case_id}: missing workflow events")
+    if (
+        types[0] != "case_received"
+        or types[-1] != "case_finalized"
+        or types.count("case_received") != 1
+        or types.count("case_finalized") != 1
+    ):
+        raise ValueError(f"{case_id}: invalid receive/finalize ordering")
+    if types.index("verification_completed") > types.index("case_finalized"):
+        raise ValueError(f"{case_id}: finalized before verification")
+    consumed = {
+        ref
+        for event in events
+        if event["event_type"] == "tool_result_consumed"
+        for ref in event.get("evidence_refs", [])
+    }
+    refs = set(output["evidence_refs"])
+    if not refs or not refs <= consumed:
+        raise ValueError(f"{case_id}: output evidence not consumed in its trace")
+    for claim in output.get("claim_assessments", []):
+        if not set(claim["evidence_refs"]) <= refs:
+            raise ValueError(f"{case_id}: claim evidence is outside output evidence")
 
 
 def _json_object(path: Path) -> dict[str, Any]:
@@ -65,6 +114,8 @@ def validate_artifacts(
         raise ValueError("traces/trace.jsonl is missing or not UTF-8") from exc
     normalized_lines: list[str] = []
     seen_events: set[str] = set()
+    events_by_case: dict[str, list[dict[str, Any]]] = {case_id: [] for case_id in expected}
+    ref_owners: dict[str, str] = {}
     for number, line in enumerate(trace_lines, 1):
         if not line.strip():
             continue
@@ -78,21 +129,28 @@ def validate_artifacts(
         if event["event_id"] in seen_events:
             raise ValueError(f"traces/trace.jsonl:{number}: duplicate event_id")
         seen_events.add(event["event_id"])
+        events_by_case[event["case_id"]].append(event)
+        for ref in event.get("evidence_refs", []):
+            owner = ref_owners.setdefault(ref, event["case_id"])
+            if owner != event["case_id"]:
+                raise ValueError("evidence reference is shared across cases")
         normalized_lines.append(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
 
     serialized = [json.dumps(value, ensure_ascii=False) for value in outputs.values()]
     if SECRET_PATTERN.search("\n".join([*serialized, *normalized_lines])):
         raise ValueError("a Team API Key appears in output or trace")
+    for case_id, output in outputs.items():
+        validate_case_consistency(output, events_by_case[case_id])
     return outputs, normalized_lines
 
 
-def package_submission(root: Path, destination: Path) -> Path:
+def package_submission(root: Path, destination: Path, artifacts_root: Path | None = None) -> Path:
     from .cases import load_case_set
 
     root = root.resolve()
     case_set = load_case_set(root)
     contracts = Contracts(root / "contracts" / "schemas")
-    outputs, trace_lines = validate_artifacts(root, case_set, contracts)
+    outputs, trace_lines = validate_artifacts(artifacts_root or root, case_set, contracts)
     manifest = build_manifest(case_set)
     contracts.validate_manifest(manifest)
 

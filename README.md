@@ -147,15 +147,15 @@ Hoàn thiện mô tả thiết kế trong `ARCHITECTURE.md`.
 ## 6. Chạy và kiểm tra
 
 ```bash
-day09 run
-day09 validate
+day09 run --artifacts-dir dist/my-run
+day09 validate --artifacts-dir dist/my-run
 ```
 
 Kết quả được tạo tại:
 
 ```text
-outputs/<case_id>.json
-traces/trace.jsonl
+dist/my-run/outputs/<case_id>.json
+dist/my-run/traces/trace.jsonl
 ```
 
 Nếu output pass schema nhưng điểm thấp, cần kiểm tra lại semantic, evidence, consistency, confidence và workflow — schema chỉ là một phần nhỏ của điểm.
@@ -163,7 +163,7 @@ Nếu output pass schema nhưng điểm thấp, cần kiểm tra lại semantic,
 ## 7. Đóng gói và nộp bài
 
 ```bash
-day09 package --output dist/submission.zip
+day09 package --artifacts-dir dist/my-run --output dist/submission.zip
 ```
 
 ZIP chỉ được chứa:
@@ -174,7 +174,22 @@ trace.jsonl
 outputs/<case_id>.json
 ```
 
-Không đưa source, input, `.env`, API key hoặc debug log vào ZIP. Sau đó upload `dist/submission.zip` tại workspace `/l3a`
+Không đưa source, input, `.env`, API key hoặc debug log vào ZIP. Sau đó upload `dist/submission.zip` tại workspace `/l3a`.
+
+Mỗi lần chạy hãy chọn thư mục mới. Nếu không truyền `--artifacts-dir` cho `run`,
+chương trình tự tạo `dist/runs/<timestamp>` và in đường dẫn khi xong. Dùng đúng
+đường dẫn đó cho `validate` và `package`; không trộn evidence giữa các run.
+Lệnh `validate`/`package` không có tùy chọn vẫn đọc artifact cũ ở root để tương thích.
+
+Kiểm thử và debug trên Windows:
+
+```powershell
+.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --basetemp=dist/test-run
+.venv/Scripts/python.exe -m ruff check src tests scripts
+.venv/Scripts/python.exe scripts/replay_evidence.py dist/my-run/evidence.jsonl
+```
+
+Replay chỉ phục vụ kiểm tra logic; không phải scorer và không đo được điểm chính thức.
 
 ## Tiêu chí chấm điểm công khai
 
