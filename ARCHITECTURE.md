@@ -13,7 +13,7 @@ Input → Coordinator → Order/Item Agent → Payment Agent → Shipment Agent 
 Pipeline gần như tuyến tính, không chạy song song: mỗi case đi qua 5 agent chuyên trách theo thứ tự cố định, với đúng một nhánh điều kiện (quay lại payment-agent lấy refund timeline khi các tín hiệu khác chưa đủ kết luận — xem mục 3). Coordinator không tự gọi MCP tool nào — vai trò của nó chỉ là điều phối (`task_assigned`) và đóng khung vòng đời case (`case_received`/`case_finalized` được `cli.py` phát ra trước và sau khi gọi `solve_case()`).
 
 Toàn bộ logic nằm trong `src/student_agent/workflow.py`, hàm `solve_case()`.
-
+//Vinh
 ## 2. Agent ownership
 
 | Actor | Input | Trách nhiệm | Output/handoff |
