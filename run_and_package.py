@@ -10,17 +10,17 @@ from student_agent.submission import package_submission, validate_artifacts
 async def main():
     root = Path('.').resolve()
     print('>>> BƯỚC 1: Bắt đầu xử lý 100 cases qua Multi-Agent Workflow...')
-    await _run(root, force=True)
+    artifacts = await _run(root)
     
     print('\n>>> BƯỚC 2: Kiểm tra tính toàn vẹn (day09 validate)...')
     case_set = load_case_set(root)
     contracts = Contracts(root / 'contracts' / 'schemas')
-    outputs, trace = validate_artifacts(root, case_set, contracts)
+    outputs, trace = validate_artifacts(artifacts, case_set, contracts)
     print(f'OK: {len(case_set.case_ids)} outputs / {len(trace)} trace events hợp lệ 100%!')
     
     print('\n>>> BƯỚC 3: Đóng gói bài nộp (day09 package)...')
     destination = root / 'dist' / 'submission.zip'
-    pkg = package_submission(root, destination)
+    pkg = package_submission(root, destination, artifacts)
     print(f'\n======================================================')
     print(f'THÀNH CÔNG: Đã tạo file nộp bài tại:')
     print(f'{pkg}')
