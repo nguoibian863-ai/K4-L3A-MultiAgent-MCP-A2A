@@ -94,7 +94,7 @@ def main() -> None:
             print(f"OK: {len(case_set.case_ids)} outputs / {len(trace)} trace events")
         elif args.command == "package":
             destination = package_submission(root, root / args.output)
-            print(f"OK: {destination}")
+            print(f"OK: {args.output}")
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
