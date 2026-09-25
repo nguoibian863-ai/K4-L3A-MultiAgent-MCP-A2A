@@ -34,7 +34,7 @@ Toàn bộ logic nằm trong `src/student_agent/workflow.py`, hàm `solve_case()
 
 ## 3. A2A protocol
 
-- **Envelope**: mỗi bước phối hợp được ghi thành 1 trace event (`task_assigned`, `handoff`, `tool_result_consumed`, `policy_decided`, `verification_completed`), tuân theo `trace-event-v1.schema.json`. Không có "message payload" tách biệt — trace event chính là envelope quan sát được.
+- Mỗi bước trong quá trình phối hợp được ghi lại dưới dạng một trace event duy nhất—thuộc các loại task_assigned, handoff, tool_result_consumed, policy_decided, hoặc verification_completed—và phải tuân thủ chuẩn trace-event-v1.schema.json. Ở đây, không tồn tại một "message payload" tách rời; chính các trace event này đóng vai trò là envelope (bao thư) duy nhất có thể quan sát được.
 - **Correlation**: mọi event và mọi lời gọi MCP đều mang `case_id` bắt buộc; `gateway.call()` yêu cầu `case_id` ở mọi lời gọi nên evidence không thể lẫn giữa các case.
 - **Điều kiện handoff**: order-agent → payment-agent → shipment-agent luôn theo thứ tự cố định. Sau shipment-agent có đúng một nhánh điều kiện: nếu trạng thái đơn, thanh toán, giao hàng đã đủ để kết luận (canceled/unavailable, mismatch, duplicate, trễ giao, split) thì handoff thẳng sang policy-agent; nếu chưa thì handoff lại payment-agent để lấy refund timeline **một lần**, rồi sang policy-agent. Nhánh này chỉ đi tối đa 1 lần nên không tạo vòng lặp. Lý do: với đơn không có refund, `get_refund_timeline` trả về lỗi và mọi lời gọi đều bị audit, nên chỉ gọi khi kết quả có thể thay đổi quyết định (giảm số lời gọi lỗi từ 60 xuống 10 case).
 - **Timeout**: dựa vào timeout của HTTP client bên dưới (`httpx2.Timeout(300s, connect=30s)`, cấu hình tại `connect_gateway()` trong `mcp_gateway.py`). Không có timeout riêng ở tầng agent.
